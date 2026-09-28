@@ -1,23 +1,31 @@
 @echo off
-REM Change directory to the location of this batch file
+REM Exhibition Label Studio - set up profiles and settings (Windows)
+chcp 65001 >nul
 cd /d "%~dp0"
 
-REM Check if the virtual environment exists
-if not exist "venv\Scripts\activate.bat" (
-    echo [SETUP] No virtual environment found. Creating one now...
-    python -m venv venv
-    
-    echo [SETUP] Installing required packages...
-    call venv\Scripts\activate.bat
-    python -m pip install --upgrade pip
-    python -m pip install pandas openpyxl reportlab
-) else (
-    echo [INFO] Activating existing virtual environment...
-    call venv\Scripts\activate.bat
+set "PY=python"
+where python >nul 2>nul || set "PY=py"
+where %PY% >nul 2>nul
+if errorlevel 1 (
+    echo Python 3 is not installed. Get it from https://www.python.org/downloads/
+    echo During install, tick "Add python.exe to PATH", then run this again.
+    pause
+    exit /b 1
 )
 
-echo [RUN] Starting label generator...
-python Generate_Labels.py
+if not exist "venv\Scripts\activate.bat" (
+    echo [SETUP] First run - creating a private Python environment...
+    %PY% -m venv venv
+    if errorlevel 1 ( echo Could not create the environment. & pause & exit /b 1 )
+)
+call venv\Scripts\activate.bat
 
-REM Keep the terminal window open to view the results
-pause
+python -c "import openpyxl, reportlab" >nul 2>nul
+if errorlevel 1 (
+    echo [SETUP] Installing required packages ^(one time, needs internet^)...
+    python -m pip install --quiet --upgrade pip
+    python -m pip install --quiet openpyxl reportlab
+    if errorlevel 1 ( echo Package install failed - check your internet connection. & pause & exit /b 1 )
+)
+
+python Generate_Labels.py configure %*

@@ -1,0 +1,41 @@
+{
+  "profile_name": "Art Exhibition - 2026",
+  "fields": {
+    "artist": "Your full name (participant)",
+    "role": "Your year level / class",
+    "title": "Title of your artwork",
+    "statement": "Artist Statement",
+    "auction": "included in the silent auction",
+    "permission": "I understand my artwork and artist statement may be displayed"
+  },
+  "details": [
+    {
+      "label": "",
+      "column": "What mediums did you use?"
+    },
+    {
+      "label": "",
+      "column": "What are the dimensions of your physical piece?"
+    }
+  ],
+  "auction": {
+    "yes_words": [
+      "yes",
+      "y",
+      "true"
+    ],
+    "text_yes": "Available for Auction",
+    "text_no": ""
+  },
+  "layout": {
+    "page_size": "A4",
+    "orientation": "landscape",
+    "columns": 2,
+    "rows": 2,
+    "margin_mm": 10,
+    "statement_size": 12,
+    "statement_min": 10,
+    "sort": "file"
+  },
+  "form_columns": []
+}
