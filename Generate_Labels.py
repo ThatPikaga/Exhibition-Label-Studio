@@ -81,7 +81,7 @@ PAGE_SIZES = {"A4": A4, "A3": A3, "Letter": letter}
 
 DEFAULT_LAYOUT = dict(page_size="A4", orientation="landscape", columns=2, rows=2, margin_mm=10,
                       statement_size=12, statement_min=10, sort="file")
-DEFAULT_AUCTION = dict(yes_words=["yes", "y", "true"], text_yes="Available for Auction", text_no="")
+DEFAULT_AUCTION = dict(yes_words=["yes", "y", "true"], text_yes="Available for Auction", text_no="Not available for Auction")
 
 # (key, short name, question, required, words that hint at the right column)
 FIELDS = [
@@ -263,6 +263,8 @@ def normalize_profile(p):
     p["fields"] = {**{k: "" for k in FIELD_KEYS}, **p.get("fields", {})}
     p.setdefault("details", [])
     p["auction"] = {**DEFAULT_AUCTION, **p.get("auction", {})}
+    if not p["auction"].get("text_no"):
+        p["auction"]["text_no"] = DEFAULT_AUCTION["text_no"]
     p["layout"] = {**DEFAULT_LAYOUT, **p.get("layout", {})}
     p.setdefault("form_columns", [])
     return p
@@ -1238,7 +1240,7 @@ def layout_menu(prof, crumb):
             if t is not None:
                 prof["auction"]["text_yes"] = t
             t = ask_text("Auction wording", "Words beside the RED dot:", prof["auction"]["text_no"], crumb=crumb,
-                         help="Leave empty to show just a red dot (or type something like:  Not for auction).")
+                        help="Leave empty to use the default:  Not available for Auction")
             if t is not None:
                 prof["auction"]["text_no"] = t
         else:

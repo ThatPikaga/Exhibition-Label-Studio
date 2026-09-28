@@ -19,13 +19,9 @@
     }
   ],
   "auction": {
-    "yes_words": [
-      "yes",
-      "y",
-      "true"
-    ],
-    "text_yes": "Available for Auction",
-    "text_no": ""
+  "yes_words": ["yes", "y", "true"],
+  "text_yes": "Available for Auction",
+  "text_no": "Not available for Auction"
   },
   "layout": {
     "page_size": "A4",
