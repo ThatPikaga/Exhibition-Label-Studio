@@ -1,12 +1,12 @@
-# Exhibition Label Studio — Submission Form → Label Generator
+# Exhibition Label Studio - A Form to Label Generator
 
-Built for the **What Orana Means To Me** exhibition, but usable for any show.
+Built for a school exhibition, but it should be usable for any show.
 
 An automated print pipeline that turns **Microsoft Forms** exhibition submissions into a **print-ready PDF of gallery labels**, replacing a slow manual design process in Canva. A friendly full-screen menu (no coding needed) teaches the app what your form's columns mean, so a new exhibition, a new year or a different school's form is a five-minute job.
 
 ---
 
-## 👀 Preview
+## Preview
 
 Everything is done from one keyboard-driven menu: **↑ ↓** to move, **Enter** to select, **Esc** to go back.
 
@@ -20,12 +20,12 @@ Everything is done from one keyboard-driven menu: **↑ ↓** to move, **Enter**
     <td align="center" width="50%">
       <img src="screenshots/02-choose-profile.png" width="440" alt="Choosing a profile to edit"><br>
       <b>2. Profiles</b><br>
-      One saved profile per form layout, e.g. <i>What Orana Means To Me - 2026</i>.
+      One saved profile per form layout, e.g. <i>Art Exhibition - 2026</i>.
     </td>
   </tr>
   <tr>
     <td align="center">
-      <img src="screenshots/03-pick-column.png" width="440" alt="Picking the spreadsheet column for the artist's name"><br>
+      <img src="screenshots/03-pick-column.png" width="440" alt="Picking the spreadsheet column for anything you want to edit"><br>
       <b>3. Match your form's columns</b><br>
       Pick which spreadsheet column is the artist's name, title, statement and so on.
     </td>
@@ -47,6 +47,12 @@ Everything is done from one keyboard-driven menu: **↑ ↓** to move, **Enter**
       The finished PDF is saved to <code>Generated_Labels/</code> and opens automatically.
     </td>
   </tr>
+    <tr>
+    <td align="center">
+      <img src="screenshots/07-label-config.png" width="440" alt="Configure how you want the labels printed"><br>
+      <b>7. Make labels</b><br>
+      Pick and choose from a seletion of options like paper size and the gaps between each label!
+    </td>
 </table>
 
 ---
@@ -99,7 +105,7 @@ If you drop in several spreadsheets, they are combined into one PDF. Identical d
 A profile remembers what each column in a form means. They are kept as small JSON files in the `profiles/` folder (created automatically) and named **`Exhibition Name - Year`**, for example:
 
 ```text
-profiles/What Orana Means To Me - 2026.json
+profiles/Art_Exhibition.json
 ```
 
 | Profile field | What it does |
@@ -203,7 +209,7 @@ The menu covers everything, but the generator can also be run directly with the 
 
 ```bash
 python Generate_Labels.py                                        # make labels, using the best-matching profile
-python Generate_Labels.py --profile "What Orana Means To Me - 2026"
+python Generate_Labels.py --profile "Art Exhibition - 2026"
 python Generate_Labels.py --limit 6                              # first 6 labels only, for a quick test
 python Generate_Labels.py configure                              # open the menu
 ```
@@ -225,7 +231,7 @@ python Generate_Labels.py configure                              # open the menu
 
 ---
 
-## ⚠️===[ Known Limitation ]===
+## |————[ Known Limitation ]————|
 
 - Profiles match columns by their question text. If a form question is reworded, re-pick that column in the profile.
 - Only the first sheet of an Excel workbook is read.

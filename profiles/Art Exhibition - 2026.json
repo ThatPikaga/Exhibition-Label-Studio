@@ -1,0 +1,62 @@
+{
+  "profile_name": "Art Exhibition - 2026",
+  "fields": {
+    "artist": "Your full name (participant)",
+    "role": "Your year level / class",
+    "title": "Title of your artwork",
+    "statement": "Artist Statement",
+    "auction": "included in the silent auction",
+    "permission": "I understand my artwork and artist statement may be displayed"
+  },
+  "details": [
+    {
+      "label": "",
+      "column": "What mediums did you use?"
+    },
+    {
+      "label": "",
+      "column": "What are the dimensions of your physical piece?"
+    }
+  ],
+  "auction": {
+    "yes_words": [
+      "yes",
+      "y",
+      "true"
+    ],
+    "text_yes": "Available for Auction",
+    "text_no": ""
+  },
+  "layout": {
+    "page_size": "A4",
+    "orientation": "landscape",
+    "columns": 2,
+    "rows": 2,
+    "margin_mm": 10,
+    "statement_size": 12,
+    "statement_min": 10,
+    "sort": "file"
+  },
+  "form_columns": [
+    "ID",
+    "Start time",
+    "Completion time",
+    "Email",
+    "Name",
+    "Last modified time",
+    "Your full name (participant)",
+    "Your year level / class",
+    "What mediums did you use? (tick all that apply)",
+    "Title of your artwork (or “Untitled”) ",
+    "Is your artwork digital or physical?",
+    "What are the dimensions of your physical piece? \nInclude your unit of measurement. \ne.g., 13 x 26 mm. If digital, submit \"NA\"",
+    "Is Your Artwork Signed?\nPlease make sure your name or signature is visible on your physical or digital artwork before you move on.\nSigning your work helps us know it is yours! \n\n\nWithout a signatu...",
+    "Artist Statement\n\nIn your own words: What does Orana mean to you, and how does your artwork show this?\n\nNote: What you write here will be displayed directly underneath your artwork at the exhibiti...",
+    "Display\nI understand my artwork and artist statement may be displayed in the school exhibition",
+    "Parent / Guardian Consent (for students under 16)",
+    "Framing Status (Physical Paintings/Artworks Only) \n\nIf possible, please ensure your physical artwork is framed by you before drop-off so it is ready to hang. \n\n(Note: If you are submitting a digit...",
+    "As the parent/guardian of the student named above, I consent to their artwork being included in the silent auction under the terms described (70% to the artist, 30% to the school), including the o...",
+    "By clicking yes, you understand and agree to the following statement above",
+    "Anything you’d like to ask me right now? (optional)"
+  ]
+}
