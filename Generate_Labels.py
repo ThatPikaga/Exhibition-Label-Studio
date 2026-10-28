@@ -677,9 +677,12 @@ def draw_card(c, card, x, top, h, foot=None):
 
 
 def render_pdf(items, profile, out_path):
-    """Lay the labels out in rows.  A label whose statement is too long simply grows taller; the row grows
-    with it and everything after moves down.  A label too tall for a column gets a full-width row, and one
-    too tall for a whole page continues onto the next page."""
+    """Draw labels at their own natural heights, stacking each column independently.
+
+    Short labels no longer inherit the height of a long label beside them. If a
+    label is too tall for a single column, it gets a full-width space. Extremely
+    long statements can still continue onto another page.
+    """
     load_fonts()
     lay = {**DEFAULT_LAYOUT, **profile["layout"]}
     pw, ph = PAGE_SIZES.get(lay["page_size"], A4)
@@ -687,10 +690,12 @@ def render_pdf(items, profile, out_path):
     m = float(lay["margin_mm"]) * mm
     uw, uh = pw - 2 * m, ph - 2 * m
     cols, rows = max(1, int(lay["columns"])), max(1, int(lay["rows"]))
-    cw, std_h = uw / cols, uh / rows
+    cw = uw / cols
+    standard_h = uh / rows  # used only for the summary, not as a forced label height
     smin = max(MIN_FONT, float(lay["statement_min"]))
     spref = max(smin, float(lay["statement_size"]))
     auc = profile["auction"]
+    gap = 8  # a little space between independently sized labels
 
     def indicator(it):
         if it["auction"] is None:
@@ -702,76 +707,102 @@ def render_pdf(items, profile, out_path):
     c = canvas.Canvas(out_path, pagesize=(pw, ph))
     c.setTitle(profile["profile_name"] + " - Labels")
     c.setAuthor("Exhibition Label Studio")
-    st = dict(y=0.0, started=False, pages=0, grown=0, wide=0, split=0, labels=0)
-    row = []
+    st = dict(started=False, pages=0, grown=0, wide=0, split=0, labels=0)
+    # Each column tracks its own used height, rather than sharing a row height.
+    column_y = [0.0] * cols
 
     def new_page():
         if st["started"]:
             c.showPage()
-        st.update(started=True, y=0.0, pages=st["pages"] + 1)
+        st["started"] = True
+        st["pages"] += 1
+        for i in range(cols):
+            column_y[i] = 0.0
 
-    def ensure_room(h):
-        if not st["started"] or st["y"] + h > uh + 0.01:
+    def start_page_if_needed():
+        if not st["started"]:
             new_page()
 
-    def flush():
-        if not row:
-            return
-        h = max(std_h, max(cd.h for cd in row))
-        ensure_room(h)
-        top = ph - m - st["y"]
-        for i, cd in enumerate(row):
-            draw_card(c, cd, m + i * cw, top, h)
-            st["grown"] += cd.h > std_h + 0.5
-        st["y"] += h
-        row.clear()
+    def place_full_width(card):
+        """Place a tall label across the page, below everything already placed."""
+        start_page_if_needed()
+        y = max(column_y)
+        if y + card.h > uh + 0.01:
+            new_page()
+            y = 0.0
+        draw_card(c, card, m, ph - m - y, card.h)
+        next_y = y + card.h + gap
+        for i in range(cols):
+            column_y[i] = next_y
+        st["wide"] += cols > 1
+        st["grown"] += card.h > standard_h + 0.5
 
     def split_across_pages(it):
+        """Split an exceptionally long statement over pages without stretching its box."""
         st["split"] += 1
+        # A full-width split label needs a clear page so it cannot overlap other labels.
+        if not st["started"] or max(column_y) > 0:
+            new_page()
         iw, ind = uw - 2 * PAD, indicator(it)
         pending = Paragraph(stmt_markup(it["statement"]), make_styles(smin)["stmt"])
         first = True
         while pending is not None:
             head = Card(it, uw, smin, ind if first else None, show_stmt=False, compact=not first)
-            room = uh - head.h - RULE_GAP
+            room = max(24, uh - head.h - RULE_GAP)
             pending.wrap(iw, 1e7)
             if pending.height <= room:
                 part, rest = pending, None
             else:
-                pieces = pending.split(iw, room - 18)
-                part, rest = (pieces[0], pieces[1] if len(pieces) > 1 else None)
+                pieces = pending.split(iw, max(12, room - 18))
+                if len(pieces) >= 2:
+                    part, rest = pieces[0], pieces[1]
+                elif pieces:
+                    part, rest = pieces[0], None
+                else:
+                    # An unusually long unbreakable string cannot be split by Paragraph.
+                    # Place the remainder as a separate paragraph to avoid an endless loop.
+                    plain = pending.getPlainText()
+                    cut = max(1, min(len(plain), int(len(plain) * 0.6)))
+                    part = Paragraph(xml_escape(plain[:cut]), make_styles(smin)["stmt"])
+                    rest = Paragraph(xml_escape(plain[cut:]), make_styles(smin)["stmt"]) if plain[cut:] else None
             card = Card(it, uw, smin, ind if first else None, stmt=part, compact=not first)
-            if first and st["started"] and st["y"] == 0:
-                pass
-            else:
-                new_page()
-            draw_card(c, card, m, ph - m, uh, foot="continued on the next page  ►" if rest else None)
-            st["y"] = uh
+            card_h = min(uh, card.h)
+            draw_card(c, card, m, ph - m, card_h,
+                      foot="continued on the next page  ►" if rest else None)
+            column_y[:] = [card_h + gap] * cols
             pending, first = rest, False
+            if pending is not None:
+                new_page()
 
     for it in items:
         ind = indicator(it)
-        card = fit_card(it, cw, spref, smin, ind, std_h)
-        if card.h > uh:                                       # too tall for one column
-            flush()
-            card = fit_card(it, uw, spref, smin, ind, std_h) if cols > 1 else card
-            if card.h > uh:
-                split_across_pages(it)
+        card = fit_card(it, cw, spref, smin, ind, uh)
+
+        # If it cannot fit within one column even at the minimum statement size,
+        # try the full page width before deciding it needs to split across pages.
+        if card.h > uh:
+            full_card = fit_card(it, uw, spref, smin, ind, uh)
+            if full_card.h <= uh:
+                place_full_width(full_card)
                 st["labels"] += 1
                 continue
-            h = max(std_h, card.h)
-            ensure_room(h)
-            draw_card(c, card, m, ph - m - st["y"], h)
-            st["y"] += h
-            st["wide"] += cols > 1
-            st["grown"] += card.h > std_h + 0.5
+            split_across_pages(it)
             st["labels"] += 1
             continue
-        row.append(card)
+
+        start_page_if_needed()
+        # Put this label into the least-used column that has room for its own height.
+        available = [i for i, y in enumerate(column_y) if y + card.h <= uh + 0.01]
+        if not available:
+            new_page()
+            available = list(range(cols))
+        col = min(available, key=lambda i: column_y[i])
+        top = ph - m - column_y[col]
+        draw_card(c, card, m + col * cw, top, card.h)
+        column_y[col] += card.h + gap
+        st["grown"] += card.h > standard_h + 0.5
         st["labels"] += 1
-        if len(row) == cols:
-            flush()
-    flush()
+
     if st["started"]:
         c.save()
     return st
