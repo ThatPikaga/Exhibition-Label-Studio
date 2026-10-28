@@ -103,16 +103,20 @@ FIELD_KEYS = tuple(k for k, *_ in FIELDS)
 DEFAULT_PROFILE = {
     "profile_name": "What Orana Means To Me - 2026",
     "fields": {
-        "artist": "Your full name (participant)",
-        "role": "Your year level / class",
-        "title": "Title of your artwork",
-        "statement": "Artist Statement",
-        "auction": "included in the silent auction",
-        "permission": "I understand my artwork and artist statement may be displayed",
+        # These are the clear headings in the cleaned export. resolve() also
+        # recognises the longer Microsoft Forms question headings.
+        "artist": "Artist",
+        "role": "Year / role",
+        "title": "Artwork title",
+        "statement": "Artist statement",
+        # This export doesn't have a confirmed auction-status column, so don't
+        # invent a red/green auction marker when the source doesn't say.
+        "auction": "",
+        "permission": "Display permission",
     },
     "details": [
-        {"label": "", "column": "What mediums did you use?"},
-        {"label": "", "column": "What are the dimensions of your physical piece?"},
+        {"label": "", "column": "Medium"},
+        {"label": "", "column": "Dimensions / size"},
     ],
     "auction": copy.deepcopy(DEFAULT_AUCTION),
     "layout": copy.deepcopy(DEFAULT_LAYOUT),
@@ -314,18 +318,107 @@ def load_profiles():
     return out
 
 
+# Alternate headings used by the cleaned workbook and common Microsoft Forms exports.
+# Exact matches are preferred so, for example, "Artist" never accidentally maps
+# to the "Artist statement" column.
+_NAME_PERMISSION_ALIASES = [
+    "i give permission to display my work with my name",
+    "permission to display my work with my name",
+    "display my work anonymously",
+    "without my name",
+]
+_HEADER_ALIASES = {
+    "artist": ["artist", "artist name", "participant name", "student name", "your full name (participant)", "full name"],
+    "role": ["year / role", "year / class", "year level / class", "year level", "year / class (shown under the name)", "class", "role"],
+    "title": ["artwork title", "title of your artwork", "name of your artwork", "title"],
+    "statement": ["artist statement", "artist's statement", "artist statement (the longer paragraph)", "artwork description", "statement"],
+    "auction": ["auction status", "included in the silent auction", "silent auction status", "auction", "for sale"],
+    "permission": ["display permission", "permission to display with name", "permission to display my work with my name", "i give permission to display my work with my name", "display consent", "consent", "permission"],
+}
+_DETAIL_HEADER_ALIASES = {
+    "medium": ["medium", "mediums", "mediums used", "materials", "what mediums did you use"],
+    "dimension": ["dimensions / size", "dimensions", "size", "what are the dimensions of your physical piece"],
+}
+
+
+def _compact_header(value):
+    return re.sub(r"[^a-z0-9]+", " ", norm(value)).strip()
+
+
+def _find_alias_col(headers, aliases, taken=()):
+    """Match alternate headings, preferring exact names over partial matches."""
+    available = [(i, header_key(h), _compact_header(h)) for i, h in enumerate(headers) if i not in taken]
+    alias_keys = [_compact_header(a) for a in aliases]
+    # Exact match first.
+    for alias in alias_keys:
+        for i, key, full in available:
+            if key and (key == alias or full == alias):
+                return i
+    # Then match a heading that begins with a known phrase.
+    for alias in alias_keys:
+        if len(alias) < 5:
+            continue
+        for i, key, full in available:
+            if key.startswith(alias) or full.startswith(alias + " "):
+                return i
+    # Last resort: a longer, distinctive alias contained in the heading.
+    for alias in sorted((a for a in alias_keys if len(a) >= 9), key=len, reverse=True):
+        for i, key, full in available:
+            if alias in full:
+                return i
+    return None
+
+
 def resolve(profile, headers):
-    idx = {k: find_col(headers, profile["fields"].get(k, "")) for k in FIELD_KEYS}
-    det = [(d.get("label", ""), find_col(headers, d.get("column", "")), d.get("column", "")) for d in profile["details"]]
+    """Resolve saved profile columns, with aliases for changed export headings."""
+    idx = {}
+    used = set()
+    for key in FIELD_KEYS:
+        phrase = profile["fields"].get(key, "")
+        column = find_col(headers, phrase) if phrase else None
+        if column in used:
+            column = None
+        # Prefer a specific name-display consent question over an older generic
+        # "artwork may be displayed" question when both exist in the form export.
+        if key == "permission":
+            specific_permission = _find_alias_col(headers, _NAME_PERMISSION_ALIASES, used)
+            if specific_permission is not None:
+                column = specific_permission
+        if column is None:
+            column = _find_alias_col(headers, _HEADER_ALIASES.get(key, []), used)
+        idx[key] = column
+        if column is not None:
+            used.add(column)
+
+    det = []
+    for detail in profile["details"]:
+        label = detail.get("label", "")
+        phrase = detail.get("column", "")
+        column = find_col(headers, phrase) if phrase else None
+        if column in used:
+            column = None
+        if column is None:
+            detail_key = "medium" if any(x in norm(label + " " + phrase) for x in ("medium", "material")) else \
+                         "dimension" if any(x in norm(label + " " + phrase) for x in ("dimension", "size")) else ""
+            column = _find_alias_col(headers, _DETAIL_HEADER_ALIASES.get(detail_key, []), used) if detail_key else None
+        det.append((label, column, phrase))
+        if column is not None:
+            used.add(column)
     return idx, det
 
 
 def match_score(profile, headers):
-    """0..1 - how many of this profile's columns exist in these headers."""
-    want = [v for v in profile["fields"].values() if v] + [d["column"] for d in profile["details"]]
-    if not want:
+    """0..1 - how many of this profile's configured columns can be resolved."""
+    idx, details = resolve(profile, headers)
+    want = [key for key, value in profile["fields"].items() if value]
+    want += ["artist", "title"] if not want else []
+    detail_want = [d for d in profile["details"] if d.get("column")]
+    total = len(want) + len(detail_want)
+    if total == 0:
         return 0.0
-    return sum(find_col(headers, w) is not None for w in want) / len(want)
+    matched = sum(idx.get(key) is not None for key in want)
+    matched += sum(col is not None for label, col, phrase in details if phrase)
+    return matched / total
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -388,6 +481,46 @@ def unsupported(text):
 # ════════════════════════════════════════════════════════════════════════════
 #  Turning spreadsheet rows into label "items"
 # ════════════════════════════════════════════════════════════════════════════
+def _hide_artist_name(permission_text):
+    """Return True when the response explicitly asks for the artist's name to be hidden."""
+    answer = norm(permission_text)
+    if not answer:
+        return False
+    if "anonymously" in answer or "anonymous" in answer or "without my name" in answer:
+        return True
+    # A direct No to displaying the work with the artist's name means the label
+    # should not print the artist's name. It doesn't automatically mean the art
+    # itself cannot be displayed.
+    if answer.startswith("no") and "name" in answer and ("display" in answer or "permission" in answer):
+        return True
+    return False
+
+
+def _prepare_statement_for_label(statement, where, who, notes):
+    """Remove our own truncation markers without printing them on a gallery label.
+
+    We cannot recreate text that wasn't supplied. If a truncation marker exists,
+    keep only the complete sentences before the unfinished sentence and warn the
+    user to check the original response.
+    """
+    text = clean_text(statement, multi=False)
+    marker = re.search(
+        r"\[\s*(?:the supplied text ends here|please check the original response|statement incomplete in source)[^\]]*\]",
+        text, flags=re.IGNORECASE,
+    )
+    if not marker:
+        return text
+
+    complete = text[:marker.start()].rstrip()
+    sentence_ends = list(re.finditer(r"[.!?][\"’”']?(?=\s|$)", complete))
+    if sentence_ends:
+        complete = complete[:sentence_ends[-1].end()].rstrip()
+    else:
+        complete = ""
+    notes.append(("warn", f"{where} ({who}): the source statement was marked as incomplete. Only its complete sentences will be printed; check the original response."))
+    return complete
+
+
 def load_items(path, profile, limit=None):
     load_fonts()
     notes, items = [], []
@@ -398,27 +531,32 @@ def load_items(path, profile, limit=None):
     idx, det = resolve(profile, headers)
     fields, auc = profile["fields"], profile["auction"]
 
-    lost = [FIELD_NAME[k] for k in FIELD_KEYS if fields.get(k) and idx[k] is None]
-    lost += ["extra detail “%s”" % short(c, 30) for _, i, c in det if i is None]
+    # Auction status is optional. If the export has no explicit auction column,
+    # leave the indicator off rather than guessing that items are or aren't for sale.
+    lost = [FIELD_NAME[k] for k in FIELD_KEYS
+            if fields.get(k) and idx[k] is None and k != "auction"]
+    lost += ["extra detail “%s”" % short(c, 30) for _, i, c in det if c and i is None]
     if idx["artist"] is None and idx["title"] is None:
         return [], [("err", f"{fname}: can't find the artist or title columns - this spreadsheet doesn't match the "
                             f"profile “{profile['profile_name']}”.  Run configure to fix or make a new profile.")]
     for name in lost:
-        important = name == FIELD_NAME["auction"]
-        notes.append(("warn", f"{fname}: couldn't find the column for {name} - "
-                              + ("EVERY label would show as NOT for auction, so the auction marker was left off." if important
-                                 else "that information is left off the labels.")))
+        if name == FIELD_NAME["permission"]:
+            explanation = "the generator cannot check which artists have asked for their names to be hidden, so please verify name permissions before printing."
+        else:
+            explanation = "that information is left off the labels."
+        notes.append(("warn", f"{fname}: couldn't find the column for {name} - {explanation}"))
 
     for rownum, row in rows:
         def g(i):
             return row[i] if i is not None and i < len(row) else None
 
-        artist = clean_text(g(idx["artist"]), multi=False)
+        source_artist = clean_text(g(idx["artist"]), multi=False)
+        artist = source_artist
         title = clean_text(g(idx["title"]), multi=False)
-        if not artist and not title:
+        if not source_artist and not title:
             continue
         where = f"{fname}, row {rownum}"
-        who = artist or title
+        who = source_artist or title
         details = []
         for label, i, _ in det:
             v = clean_text(g(i))
@@ -427,15 +565,23 @@ def load_items(path, profile, limit=None):
         status = None
         if idx["auction"] is not None:
             ans = clean_text(g(idx["auction"]))
-            status = is_yes(ans, auc["yes_words"])
-            if not ans:
-                notes.append(("warn", f"{where} ({who}): auction question left blank - shown as NOT for auction."))
-        if idx["permission"] is not None:
-            ans = clean_text(g(idx["permission"]))
-            if not is_yes(ans, ["yes"]):
-                notes.append(("warn", f"{where} ({who}): display permission isn't a clear Yes ({short(ans or 'blank', 40)}) - please check."))
-        item = dict(artist=artist, role=clean_text(g(idx["role"])), title=title, details=details,
-                    statement=clean_text(g(idx["statement"]), multi=False), auction=status, where=where)
+            if ans:
+                status = is_yes(ans, auc["yes_words"])
+            else:
+                notes.append(("warn", f"{where} ({who}): auction status is blank, so no auction marker will be printed."))
+
+        permission_text = clean_text(g(idx["permission"])) if idx["permission"] is not None else ""
+        hide_name = _hide_artist_name(permission_text)
+        if hide_name:
+            if norm(artist) != "anonymous":
+                artist = ""
+                notes.append(("info", f"{where} ({who}): artist name omitted from the label to respect the display-permission response."))
+        elif idx["permission"] is not None and not is_yes(permission_text, ["yes"]):
+            notes.append(("warn", f"{where} ({who}): display permission isn't a clear Yes ({short(permission_text or 'blank', 40)}) - please check."))
+
+        statement_text = _prepare_statement_for_label(g(idx["statement"]), where, who, notes)
+        item = dict(artist=artist, _artist_key=norm(source_artist), role=clean_text(g(idx["role"])),
+                    title=title, details=details, statement=statement_text, auction=status, where=where)
         bad = unsupported(" ".join([artist, item["role"], title, item["statement"]] + details))
         if bad:
             notes.append(("warn", f"{where} ({who}): contains characters this font can't draw: {' '.join(bad[:8])}"))
@@ -644,7 +790,7 @@ def build_labels(profile, files, out_path, limit=None):
         notes += nts
     seen, unique = set(), []
     for it in items:
-        key = (norm(it["artist"]), norm(it["title"]), norm(it["statement"]))
+        key = (norm(it.get("_artist_key", it["artist"])), norm(it["title"]), norm(it["statement"]))
         if key in seen:
             notes.append(("info", f"{it['where']}: identical entry already included - skipped the duplicate."))
             continue
@@ -659,6 +805,10 @@ def build_labels(profile, files, out_path, limit=None):
         unique = unique[:limit]
     if not unique:
         return None, notes
+
+    # ── Australian-English spell check (interactive) ──────────────────────
+    run_spell_check(unique, notes)
+
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     try:
         stats = render_pdf(unique, profile, out_path)
@@ -950,6 +1100,728 @@ def open_path(path):
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Australian English Spell Checker (SymSpell-backed, with built-in fallback)
+# ════════════════════════════════════════════════════════════════════════════
+_SPELL_WORDS = None  # loaded lazily
+_SPELL_HAS_FULL_DICT = False
+_SPELL_FULL_DICT_WORD_COUNT = 0
+_SPELL_WORDS_BY_LENGTH = None  # used by the built-in fallback suggestion engine
+_SPELL_WORDS_INDEX_ID = None
+_SPELL_SUGGEST_CACHE = {}
+_SPELL_CUSTOM_WORDS = set()
+
+# SymSpell is a small, established spell-suggestion library. It builds an index
+# once, so we don't have to compare a typo against every word in a large list.
+# If it can't be installed (for example, when offline), the existing checker
+# below still works as a fallback.
+_SPELL_SYMSPELL = None
+_SPELL_SYMSPELL_VERBOSITY = None
+_SPELL_SYMSPELL_WORD_SET_ID = None
+_SPELL_SYMSPELL_ATTEMPTED = False
+_SPELL_SYMSPELL_LOAD_FAILED = False
+# A short or broken file should not switch on full-dictionary mode and cause
+# every unfamiliar name or art term to be flagged as a spelling mistake.
+_SPELL_MIN_FULL_DICT_WORDS = 500
+
+# These are words that often get missed by a general English word list. The
+# correction is suggested, not silently applied, so the user stays in control.
+_SPELL_COMMON_TYPO = {
+    "teh": "the", "taht": "that", "thier": "their", "recieve": "receive",
+    "recieved": "received", "beleive": "believe", "wierd": "weird",
+    "freind": "friend", "becuase": "because", "definately": "definitely",
+    "definetely": "definitely", "seperate": "separate", "occured": "occurred",
+    "occurence": "occurrence", "untill": "until", "wich": "which",
+    "enviroment": "environment", "begining": "beginning", "comming": "coming",
+    "beautifull": "beautiful", "realy": "really", "relevent": "relevant",
+    "succesful": "successful", "sucess": "success", "responsability": "responsibility",
+    "immediatly": "immediately", "occassion": "occasion", "acheive": "achieve",
+    "probaly": "probably", "tomorow": "tomorrow", "grammer": "grammar",
+    "arguement": "argument", "goverment": "government", "independant": "independent",
+    "knowlege": "knowledge", "maintainance": "maintenance", "neccessary": "necessary",
+    "publically": "publicly", "recomend": "recommend", "suprise": "surprise",
+    "throught": "through", "tommorow": "tomorrow", "wiches": "wishes",
+    "accomodate": "accommodate", "acommodate": "accommodate",
+    "adress": "address", "agressive": "aggressive", "apparantly": "apparently",
+    "appearence": "appearance", "arguement": "argument", "beleif": "belief",
+    "calender": "calendar", "comming": "coming", "commitee": "committee",
+    "concious": "conscious", "curiousity": "curiosity", "desparate": "desperate",
+    "dissapear": "disappear", "embarass": "embarrass", "existance": "existence",
+    "experiance": "experience", "finaly": "finally", "gaurd": "guard",
+    "greatful": "grateful", "happend": "happened", "harrass": "harass",
+    "heigth": "height", "heirarchy": "hierarchy", "indispensible": "indispensable",
+    "lenght": "length", "liason": "liaison", "millenium": "millennium",
+    "mispell": "misspell", "neccessarily": "necessarily", "occassionally": "occasionally",
+    "priviledge": "privilege", "reccomend": "recommend", "reccommend": "recommend",
+    "refered": "referred", "releive": "relieve", "remeber": "remember",
+    "restaraunt": "restaurant", "rythm": "rhythm", "succesfully": "successfully",
+    "supercede": "supersede", "tommorrow": "tomorrow", "truely": "truly",
+    "unfortunatly": "unfortunately", "usefull": "useful", "wether": "whether",
+    "wich": "which", "writting": "writing", "yeild": "yield",
+}
+
+# Where both forms are seen, prefer the usual Australian spelling for labels.
+# Some similar-looking pairs (for example licence/license and practice/practise)
+# are deliberately left out because the right spelling depends on grammar.
+_SPELL_AU_VARIANTS = {
+    "color": "colour", "colors": "colours", "colored": "coloured",
+    "coloring": "colouring", "colorful": "colourful", "colorless": "colourless",
+    "favorite": "favourite", "favorites": "favourites", "favor": "favour",
+    "favors": "favours", "favored": "favoured", "favoring": "favouring",
+    "favorable": "favourable", "favorably": "favourably",
+    "flavor": "flavour", "flavors": "flavours", "flavored": "flavoured",
+    "flavoring": "flavouring", "honor": "honour", "honors": "honours",
+    "honored": "honoured", "honoring": "honouring", "honorable": "honourable",
+    "neighbor": "neighbour", "neighbors": "neighbours", "neighboring": "neighbouring",
+    "neighborhood": "neighbourhood", "labor": "labour", "labors": "labours",
+    "labored": "laboured", "laboring": "labouring", "laborer": "labourer",
+    "behavior": "behaviour", "behaviors": "behaviours", "behavioral": "behavioural",
+    "rumor": "rumour", "rumors": "rumours", "rumored": "rumoured",
+    "humor": "humour", "humors": "humours", "humorless": "humourless",
+    "vapor": "vapour", "odor": "odour", "odors": "odours", "harbor": "harbour",
+    "harbors": "harbours", "tumor": "tumour", "tumors": "tumours",
+    "mold": "mould", "molds": "moulds", "molded": "moulded", "molding": "moulding",
+    "center": "centre", "centers": "centres", "centered": "centred",
+    "centering": "centring", "centerpiece": "centrepiece",
+    "theater": "theatre", "theaters": "theatres", "theatergoer": "theatregoer",
+    "organize": "organise", "organizes": "organises", "organized": "organised",
+    "organizing": "organising", "organization": "organisation",
+    "organizations": "organisations", "organizational": "organisational",
+    "organizer": "organiser", "organizers": "organisers",
+    "recognize": "recognise", "recognizes": "recognises", "recognized": "recognised",
+    "recognizing": "recognising", "recognizable": "recognisable",
+    "realize": "realise", "realizes": "realises", "realized": "realised",
+    "realizing": "realising", "realization": "realisation", "realizations": "realisations",
+    "summarize": "summarise", "summarizes": "summarises", "summarized": "summarised",
+    "summarizing": "summarising", "memorize": "memorise", "memorized": "memorised",
+    "memorizing": "memorising", "visualize": "visualise", "visualized": "visualised",
+    "visualizing": "visualising", "customize": "customise", "customized": "customised",
+    "customizing": "customising", "modernize": "modernise", "modernized": "modernised",
+    "modernizing": "modernising", "utilize": "utilise", "utilized": "utilised",
+    "utilizing": "utilising", "standardize": "standardise", "standardized": "standardised",
+    "standardizing": "standardising", "centralize": "centralise", "centralized": "centralised",
+    "centralizing": "centralising", "categorize": "categorise", "categorized": "categorised",
+    "categorizing": "categorising", "capitalize": "capitalise", "capitalized": "capitalised",
+    "capitalizing": "capitalising", "civilization": "civilisation", "civilizations": "civilisations",
+    "symbolize": "symbolise", "symbolized": "symbolised", "symbolizing": "symbolising",
+    "stabilize": "stabilise", "stabilized": "stabilised", "stabilizing": "stabilising",
+    "legalize": "legalise", "legalized": "legalised", "legalizing": "legalising",
+    "industrialize": "industrialise", "industrialized": "industrialised",
+    "industrializing": "industrialising",
+    "analyze": "analyse", "analyzes": "analyses", "analyzed": "analysed",
+    "analyzing": "analysing", "analyzer": "analyser", "paralyze": "paralyse",
+    "paralyzed": "paralysed", "paralyzing": "paralysing",
+    "apologize": "apologise", "apologized": "apologised", "apologizing": "apologising",
+    "criticize": "criticise", "criticized": "criticised", "criticizing": "criticising",
+    "emphasize": "emphasise", "emphasized": "emphasised", "emphasizing": "emphasising",
+    "maximize": "maximise", "minimize": "minimise", "prioritize": "prioritise",
+    "specialize": "specialise", "specialized": "specialised",
+    "defense": "defence", "defenses": "defences", "offense": "offence",
+    "offenses": "offences", "gray": "grey", "traveling": "travelling",
+    "traveler": "traveller", "travelers": "travellers", "traveled": "travelled",
+    "canceling": "cancelling", "canceled": "cancelled", "jewelry": "jewellery",
+    "pajamas": "pyjamas", "aluminum": "aluminium", "maneuver": "manoeuvre",
+    "maneuvers": "manoeuvres", "mustache": "moustache", "specialty": "speciality",
+    "pediatric": "paediatric", "pediatrics": "paediatrics", "pediatrician": "paediatrician",
+    "estrogen": "oestrogen", "fetus": "foetus", "anemia": "anaemia",
+    "diarrhea": "diarrhoea", "orthopedics": "orthopaedics", "anesthesia": "anaesthesia",
+    "cesarean": "caesarean", "esophagus": "oesophagus", "encyclopedia": "encyclopaedia",
+    "catalog": "catalogue", "catalogs": "catalogues", "dialog": "dialogue",
+    "dialogs": "dialogues", "checkered": "chequered",
+    "cozy": "cosy", "cozier": "cosier", "coziest": "cosiest",
+    "aging": "ageing", "skeptic": "sceptic",
+    "skeptics": "sceptics", "skeptical": "sceptical", "skepticism": "scepticism",
+    "esthetic": "aesthetic", "esthetics": "aesthetics", "omelet": "omelette",
+    "paleontologist": "palaeontologist", "paleontology": "palaeontology",
+    "enroll": "enrol", "enrolls": "enrols",
+    "enrollment": "enrolment", "enrollments": "enrolments",
+    "fulfill": "fulfil", "fulfills": "fulfils", "fulfillment": "fulfilment",
+    "installment": "instalment", "installments": "instalments",
+    "skillful": "skilful", "skillfully": "skilfully", "woolen": "woollen",
+    "saber": "sabre", "sabers": "sabres", "plow": "plough", "plows": "ploughs",
+    "plowed": "ploughed", "plowing": "ploughing",
+    "labeling": "labelling", "labeled": "labelled", "modeling": "modelling",
+    "modeled": "modelled", "counseling": "counselling", "counseled": "counselled",
+    "jeweler": "jeweller", "jewelers": "jewellers", "worshiping": "worshipping",
+    "worshiped": "worshipped", "fueling": "fuelling", "fueled": "fuelled",
+    "signaling": "signalling", "signaled": "signalled", "traveling": "travelling",
+}
+
+# Words that should not be flagged, including common words and known names from
+# the example exhibition profile.
+_SPELL_KEEP = {
+    "a", "i", "ok", "okay", "na", "n/a", "artwork", "artworks",
+    "oras", "orana", "oraan", "oranna",
+    # Contractions are common in artist statements and should not depend on
+    # whether the supplied dictionary happens to contain apostrophe forms.
+    "ain't", "aren't", "can't", "couldn't", "could've", "didn't", "doesn't",
+    "don't", "hadn't", "hasn't", "haven't", "he'd", "he'll", "he's", "i'd",
+    "i'll", "i'm", "i've", "isn't", "it'd", "it'll", "it's", "let's", "mustn't",
+    "shan't", "she'd", "she'll", "she's", "shouldn't", "that's", "there's",
+    "they'd", "they'll", "they're", "they've", "wasn't", "we'd", "we'll",
+    "we're", "we've", "weren't", "what's", "when's", "where's", "who's",
+    "won't", "wouldn't", "you'd", "you'll", "you're", "you've",
+}
+
+# Proper spellings we always want available, even if the external dictionary
+# is missing or a little incomplete.
+_BUILTIN_AU_WORDS = set((
+    "a an and are as at be been being by can could did do does for from had has have he her hers him his "
+    "i if in into is it its may me might mine more most my no not of on one or our ours out over per "
+    "she should so some than that the their theirs them then there these they this those through to too "
+    "under up us very was we were what when where which who why will with would you your yours "
+    "about above across after again against all also although always among another any around art artist "
+    "artists artwork beautiful because before best between both bright calm came care change children clay "
+    "colour colours colourful centre centres centimetre centimetres favourite favourites neighbour neighbourhood "
+    "organise organised organisation recognise recognised realise realised analyse analysed travelled travelling "
+    "cancelled cancelling defence offence grey jewellery pyjamas aluminium theatre theatres metre litre mould "
+    "paint painting paper people person place plants peaceful picture pictures made make makes making natural "
+    "nature new old other outside own part parts people place river sky small soft special story stories "
+    "student students texture the time tree trees use used uses using water way well work world year years "
+    "environment different family feeling feelings flower flowers garden grass ground heart home house life "
+    "light line lines love meaning memory mountain mountains music orange red blue green black white yellow "
+    "artist statement visual arts mixed media acrylic pencil pastel sculpture drawing painting"
+).split())
+_BUILTIN_AU_WORDS.update(_SPELL_AU_VARIANTS.values())
+_BUILTIN_AU_WORDS.update(v for v in _SPELL_COMMON_TYPO.values() if " " not in v)
+
+_SPELL_FIELDS = [
+    # Names and class labels contain proper nouns and short abbreviations much
+    # more often than prose, so checking them creates lots of misleading alerts.
+    ("title", "Artwork title"),
+    ("statement", "Artist statement"),
+]
+_SPELL_MIN_LEN = 3
+_SPELL_TOKEN_RE = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*", re.UNICODE)
+
+
+def _normal_spell_word(word):
+    return unicodedata.normalize("NFC", str(word)).casefold().replace("’", "'").strip()
+
+
+_SPELL_DICT_SOURCE = None
+
+
+def _find_spell_dictionary():
+    """Find the main Australian dictionary even if the download kept its suffix."""
+    preferred = ["AU_english.txt", "en_AU.txt", "en_AU-ise.txt", "en_AU-large.txt"]
+    for filename in preferred:
+        path = os.path.join(BASE, filename)
+        if os.path.isfile(path):
+            return path
+
+    # Browsers sometimes save a download as AU_english (1).txt. Accept that,
+    # and prefer the largest matching full dictionary if multiple copies exist.
+    candidates = []
+    try:
+        for filename in os.listdir(BASE):
+            lower = filename.casefold()
+            if lower.endswith(".txt") and not lower.endswith("_custom.txt") and (
+                lower.startswith("au_english") or lower.startswith("en_au")
+            ):
+                path = os.path.join(BASE, filename)
+                if os.path.isfile(path):
+                    candidates.append(path)
+    except OSError:
+        return None
+    return max(candidates, key=lambda item: os.path.getsize(item), default=None)
+
+
+def _load_spell_words():
+    """Load the built-in words, a full Australian list and personal additions."""
+    global _SPELL_WORDS, _SPELL_HAS_FULL_DICT, _SPELL_FULL_DICT_WORD_COUNT
+    global _SPELL_CUSTOM_WORDS, _SPELL_DICT_SOURCE
+    if _SPELL_WORDS is not None:
+        return _SPELL_WORDS
+
+    words = {_normal_spell_word(w) for w in _BUILTIN_AU_WORDS}
+    custom_words = set()
+    full_dictionary_words = set()
+    main_dictionary = _find_spell_dictionary()
+    _SPELL_DICT_SOURCE = os.path.basename(main_dictionary) if main_dictionary else None
+    sources = []
+    if main_dictionary:
+        sources.append((main_dictionary, True))
+    custom_path = os.path.join(BASE, "AU_english_custom.txt")
+    if os.path.isfile(custom_path):
+        sources.append((custom_path, False))
+
+    for path, is_full in sources:
+        try:
+            with open(path, encoding="utf-8-sig") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    # Plain word lists are expected. Strip a possible comment,
+                    # trailing punctuation and Hunspell-style /flags if present.
+                    word = line.split()[0].split("/", 1)[0].strip(",;:")
+                    word = _normal_spell_word(word)
+                    if not word or not re.fullmatch(r"[^\W\d_]+(?:['’][^\W\d_]+)*", word, re.UNICODE):
+                        continue
+                    words.add(word)
+                    if is_full:
+                        full_dictionary_words.add(word)
+                    else:
+                        custom_words.add(word)
+        except (OSError, UnicodeError):
+            # Keep the built-in words available if the file cannot be read.
+            continue
+
+    # An empty, truncated or accidentally replaced word list must not make the
+    # checker treat all unfamiliar names and art terms as mistakes.
+    _SPELL_FULL_DICT_WORD_COUNT = len(full_dictionary_words)
+    _SPELL_HAS_FULL_DICT = _SPELL_FULL_DICT_WORD_COUNT >= _SPELL_MIN_FULL_DICT_WORDS
+    _SPELL_CUSTOM_WORDS = custom_words
+    _SPELL_WORDS = words
+    return _SPELL_WORDS
+
+def _levenshtein(a, b):
+    """Damerau-Levenshtein distance; a swapped pair counts as one typo."""
+    da = {}
+    d = [[0] * (len(b) + 2) for _ in range(len(a) + 2)]
+    maxdist = len(a) + len(b)
+    d[0][0] = maxdist
+    for i in range(len(a) + 1):
+        d[i + 1][0] = maxdist
+        d[i + 1][1] = i
+    for j in range(len(b) + 1):
+        d[0][j + 1] = maxdist
+        d[1][j + 1] = j
+    for i in range(1, len(a) + 1):
+        db = 0
+        for j in range(1, len(b) + 1):
+            i2 = da.get(b[j - 1], 0)
+            j2 = db
+            if a[i - 1] == b[j - 1]:
+                d[i + 1][j + 1] = d[i][j]
+                db = j
+            else:
+                d[i + 1][j + 1] = min(d[i][j], d[i + 1][j], d[i][j + 1]) + 1
+            d[i + 1][j + 1] = min(
+                d[i + 1][j + 1],
+                d[i2][j2] + (i - i2 - 1) + 1 + (j - j2 - 1),
+            )
+        da[a[i - 1]] = i
+    return d[len(a) + 1][len(b) + 1]
+
+
+def _spell_apply_case(suggestion, original):
+    """Keep the original word's capitalisation when applying a suggestion."""
+    if not suggestion:
+        return suggestion
+    if original.isupper():
+        return suggestion.upper()
+    if original.istitle():
+        return suggestion[:1].upper() + suggestion[1:]
+    if original[:1].isupper():
+        return suggestion[:1].upper() + suggestion[1:]
+    return suggestion
+
+
+def _spell_is_likely_proper_name(raw, text, start, lower):
+    """Avoid most mid-sentence names while still checking sentence beginnings."""
+    if not raw[:1].isupper() or raw.isupper():
+        return False
+    if lower in _SPELL_COMMON_TYPO or lower in _SPELL_AU_VARIANTS:
+        return False
+    before = text[:start].rstrip()
+    # Treat a capitalised word after a sentence break as normal prose, not a
+    # proper name. Also account for quotation marks/brackets before a sentence.
+    before = re.sub(r"[\"'“”‘’»«()\[\]{}]+\s*$", "", before).rstrip()
+    if not before or before[-1] in ".!?\n":
+        return False
+    return True
+
+
+def _spell_known_word(word, word_set):
+    """Recognise dictionary words and a few safe, common inflections."""
+    w = _normal_spell_word(word)
+    if w in word_set or w in _SPELL_KEEP:
+        return True
+    if w.endswith("'s") and w[:-2] in word_set:
+        return True
+    if w.endswith("ies") and w[:-3] + "y" in word_set:
+        return True
+    for suffix in ("s", "es", "ed", "ing", "er", "est", "ly"):
+        if not w.endswith(suffix) or len(w) <= len(suffix) + 2:
+            continue
+        stem = w[:-len(suffix)]
+        candidates = {stem, stem + "e"}
+        if stem.endswith("i"):
+            candidates.add(stem[:-1] + "y")
+        # Only allow normal doubled consonants (run -> running, stop -> stopped).
+        # In particular, don't let a typo such as "walkking" pass just because
+        # removing the extra k happens to reveal a real word.
+        if (len(stem) > 2 and stem[-1] == stem[-2]
+                and stem[-1] in "bdfglmnprstz" and stem[-3] != stem[-1]):
+            candidates.add(stem[:-1])
+        if candidates.intersection(word_set):
+            return True
+    return False
+
+
+# These common words get a small frequency boost when suggestions are tied.
+# SymSpell itself supplies the fast candidate search; this keeps the final order
+# sensible even when the Australian source list doesn't include word frequencies.
+_SPELL_COMMON_WORD_FREQUENCY = {
+    "the": 100, "and": 95, "that": 90, "with": 85, "from": 80,
+    "because": 78, "receive": 76, "believe": 74, "beautiful": 72,
+    "different": 70, "environment": 68, "necessary": 66, "separate": 64,
+    "colour": 62, "centre": 62, "favourite": 60, "organise": 58,
+    "recognise": 56, "realise": 54, "travelling": 52, "cancelled": 50,
+}
+
+
+def _load_symspell(word_set):
+    """Build the fast suggestion index once, using the user's Australian list."""
+    global _SPELL_SYMSPELL, _SPELL_SYMSPELL_VERBOSITY
+    global _SPELL_SYMSPELL_WORD_SET_ID, _SPELL_SYMSPELL_ATTEMPTED
+    global _SPELL_SYMSPELL_LOAD_FAILED
+
+    if _SPELL_SYMSPELL is not None and _SPELL_SYMSPELL_WORD_SET_ID == id(word_set):
+        return _SPELL_SYMSPELL
+    if _SPELL_SYMSPELL_ATTEMPTED:
+        return None
+
+    _SPELL_SYMSPELL_ATTEMPTED = True
+    try:
+        from symspellpy import SymSpell, Verbosity
+    except ImportError:
+        # Match the script's first-run setup style, but keep this dependency
+        # optional so the label generator still works without internet access.
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--quiet", "symspellpy"],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+            importlib.invalidate_caches()
+            from symspellpy import SymSpell, Verbosity
+        except Exception:
+            _SPELL_SYMSPELL_LOAD_FAILED = True
+            return None
+
+    try:
+        checker = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
+        for candidate in word_set:
+            # The current dictionary is a plain list without frequencies. A
+            # few everyday words get a boost; all other words start at one.
+            if candidate and candidate.isalpha():
+                checker.create_dictionary_entry(
+                    candidate, _SPELL_COMMON_WORD_FREQUENCY.get(candidate, 1)
+                )
+    except Exception:
+        _SPELL_SYMSPELL_LOAD_FAILED = True
+        return None
+
+    _SPELL_SYMSPELL = checker
+    _SPELL_SYMSPELL_VERBOSITY = Verbosity
+    _SPELL_SYMSPELL_WORD_SET_ID = id(word_set)
+    return _SPELL_SYMSPELL
+
+
+def _spell_suggest(word, word_set, max_dist=2, top_n=8):
+    """Find close corrections with SymSpell, then prefer Australian forms."""
+    global _SPELL_WORDS_BY_LENGTH, _SPELL_WORDS_INDEX_ID, _SPELL_SYMSPELL_LOAD_FAILED
+    w = _normal_spell_word(word)
+    cache_key = (id(word_set), w, max_dist, top_n)
+    if cache_key in _SPELL_SUGGEST_CACHE:
+        return list(_SPELL_SUGGEST_CACHE[cache_key])
+
+    preferred = _SPELL_COMMON_TYPO.get(w) or _SPELL_AU_VARIANTS.get(w)
+    if not _SPELL_HAS_FULL_DICT:
+        result = [preferred] if preferred else []
+        _SPELL_SUGGEST_CACHE[cache_key] = result
+        return list(result)
+
+    candidates = {}
+    checker = _load_symspell(word_set)
+    if checker is not None:
+        try:
+            matches = checker.lookup(
+                w, _SPELL_SYMSPELL_VERBOSITY.ALL,
+                max_edit_distance=max_dist, include_unknown=False,
+            )
+            for match in matches:
+                candidate = _normal_spell_word(match.term)
+                # Don't suggest American spellings when an Australian option
+                # is listed, and don't offer the original word back to itself.
+                if candidate in _SPELL_AU_VARIANTS or candidate == w:
+                    continue
+                if match.distance > 0 and match.distance <= max_dist:
+                    candidates[candidate] = match.distance
+        except Exception:
+            # Unexpected package/API issues shouldn't stop label generation.
+            checker = None
+            _SPELL_SYMSPELL_LOAD_FAILED = True
+
+    if checker is None:
+        # Built-in fallback for offline installs or if SymSpell isn't available.
+        if _SPELL_WORDS_BY_LENGTH is None or _SPELL_WORDS_INDEX_ID != id(word_set):
+            by_length = {}
+            for candidate in word_set:
+                if candidate and candidate.isalpha():
+                    by_length.setdefault(len(candidate), []).append(candidate)
+            _SPELL_WORDS_BY_LENGTH = by_length
+            _SPELL_WORDS_INDEX_ID = id(word_set)
+
+        min_len = max(1, len(w) - max_dist)
+        max_len = len(w) + max_dist
+        for length in range(min_len, max_len + 1):
+            for candidate in _SPELL_WORDS_BY_LENGTH.get(length, ()):
+                if candidate in _SPELL_AU_VARIANTS or candidate == w:
+                    continue
+                distance = _levenshtein(candidate, w)
+                if 0 < distance <= max_dist:
+                    candidates[candidate] = distance
+
+    ordered = sorted(
+        candidates,
+        key=lambda candidate: (
+            candidates[candidate],
+            -_SPELL_COMMON_WORD_FREQUENCY.get(candidate, 0),
+            candidate,
+        ),
+    )
+    result = []
+    if preferred:
+        result.append(preferred)
+    for candidate in ordered:
+        if candidate not in result:
+            result.append(candidate)
+        if len(result) >= top_n:
+            break
+    result = result[:top_n]
+    _SPELL_SUGGEST_CACHE[cache_key] = result
+    return list(result)
+
+
+def _spell_add_custom_word(word, word_set, notes):
+    """Add a one-word spelling to the personal list so future runs remember it."""
+    lower = _normal_spell_word(word)
+    if not lower or any(ch.isspace() for ch in lower):
+        return
+    global _SPELL_WORDS_BY_LENGTH, _SPELL_WORDS_INDEX_ID, _SPELL_CUSTOM_WORDS
+    word_set.add(lower)
+    _SPELL_CUSTOM_WORDS.add(lower)
+    _SPELL_WORDS_BY_LENGTH = None
+    _SPELL_WORDS_INDEX_ID = None
+    _SPELL_SUGGEST_CACHE.clear()
+    if _SPELL_SYMSPELL is not None and lower.isalpha():
+        try:
+            _SPELL_SYMSPELL.create_dictionary_entry(
+                lower, _SPELL_COMMON_WORD_FREQUENCY.get(lower, 1)
+            )
+        except Exception:
+            pass
+    path = os.path.join(BASE, "AU_english_custom.txt")
+    try:
+        existing = set()
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8-sig") as fh:
+                existing = {_normal_spell_word(line.strip()) for line in fh if line.strip() and not line.lstrip().startswith("#")}
+        if lower not in existing:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(lower + "\n")
+        notes.append(("ok", "Added “%s” to your custom spelling dictionary." % word))
+    except (OSError, UnicodeError):
+        notes.append(("warn", "Kept “%s” as a recognised word for this run, but couldn't save it to AU_english_custom.txt." % word))
+
+
+def spell_check_field(field_label, text, word_set, notes, skip_all_ref):
+    """Check text and let the user correct, skip or remember questionable words."""
+    if not text or skip_all_ref[0]:
+        return text, False
+
+    replacements = []
+    full_text = str(text)
+    for match in _SPELL_TOKEN_RE.finditer(full_text):
+        raw = match.group()
+        stripped = raw.strip("'’-")
+        if len(stripped) < _SPELL_MIN_LEN or any(ch.isdigit() for ch in stripped):
+            continue
+        if stripped.isupper() and len(stripped) <= 8:
+            continue
+        lower = _normal_spell_word(stripped)
+        if lower in _SPELL_KEEP:
+            continue
+
+        # Explicit US-to-Australian preferences and common typo fixes are
+        # checked even if the supplied dictionary happens to contain the US form.
+        forced_correction = (lower in _SPELL_AU_VARIANTS or lower in _SPELL_COMMON_TYPO) and lower not in _SPELL_CUSTOM_WORDS
+        if not forced_correction and _spell_is_likely_proper_name(raw, full_text, match.start(), lower):
+            continue
+        if not forced_correction and _spell_known_word(lower, word_set):
+            continue
+        # Without AU_english.txt, only flag high-confidence known problems. This
+        # avoids treating every unfamiliar name or art term as a spelling error.
+        if not forced_correction and not _SPELL_HAS_FULL_DICT:
+            continue
+        replacements.append((match.start(), match.end(), raw, stripped, lower))
+
+    if not replacements:
+        return text, False
+
+    if not IS_TTY:
+        for _, _, raw, stripped, lower in replacements:
+            suggestions = _spell_suggest(stripped, word_set)
+            if suggestions:
+                notes.append(("warn", "Spell check (%s): “%s” may need checking. Suggestion: “%s”." %
+                              (field_label, raw, _spell_apply_case(suggestions[0], raw))))
+            else:
+                notes.append(("warn", "Spell check (%s): “%s” may be misspelled." % (field_label, raw)))
+        return text, False
+
+    result_chars = list(full_text)
+    offset = 0
+    changed = False
+    for start, end, raw, stripped, lower in replacements:
+        if skip_all_ref[0]:
+            break
+        adj_start, adj_end = start + offset, end + offset
+        current = "".join(result_chars[adj_start:adj_end])
+        entire = "".join(result_chars)
+        ctx_before = entire[max(0, adj_start - 40):adj_start].strip()
+        ctx_after = entire[adj_end:adj_end + 40].strip()
+        context_str = ("…" if adj_start > 40 else "") + ctx_before + \
+                      "  " + sty(current, BOLD, BAD) + "  " + ctx_after + \
+                      ("…" if adj_end + 40 < len(entire) else "")
+
+        suggestions = _spell_suggest(stripped, word_set)
+        correct = _spell_correct_one(field_label, current, stripped, context_str,
+                                     suggestions, skip_all_ref, word_set, notes)
+        if correct is None:
+            continue
+        if correct == "___ADDED_TO_DICT___":
+            continue
+        if correct == "___SKIP_ALL___" or skip_all_ref[0]:
+            skip_all_ref[0] = True
+            break
+        if correct != current:
+            result_chars[adj_start:adj_end] = list(correct)
+            offset += len(correct) - len(current)
+            changed = True
+            if correct != raw:
+                notes.append(("ok", "Spell check (%s): “%s” → “%s”" % (field_label, current, correct)))
+    return "".join(result_chars), changed
+
+
+def _spell_correct_one(field_label, raw, stripped, context_str, suggestions,
+                       skip_all_ref, word_set, notes):
+    """Show suggestions and actions for one word. Return the chosen replacement."""
+    items = []
+    if suggestions:
+        for suggestion in suggestions[:8]:
+            display = _spell_apply_case(suggestion, raw)
+            items.append(dict(label=display, value=display, desc=""))
+        items.append(dict(sep=True, label="More actions"))
+    else:
+        items.append(dict(sep=True, label="No suggestions found"))
+    items.append(dict(label="[Skip this time]", value="__skip__", desc="Leave “%s” as-is." % raw))
+    items.append(dict(label="[Add to dictionary]", value="__add__",
+                      desc="Remember this word for future checks."))
+    items.append(dict(label="[Skip all remaining]", value="__skip_all__",
+                      desc="Don't ask again during this run."))
+    items.append(dict(label="[Type a replacement…]", value="__type__",
+                      desc="Manually type your own correction."))
+
+    while True:
+        header_parts = [sty("Spell Check", BOLD, ACC),
+                        sty("Field: ", VIO) + sty(field_label, BOLD), context_str]
+        if suggestions:
+            header_parts.append(sty("Suggestions (Australian English):", VIO))
+        else:
+            header_parts.append(sty("No suggestions found for “%s”" % raw, WARN))
+        r = menu("Spell Check", items, subtitle="\n".join(header_parts),
+                 crumb="Spell Check", esc="Skip this word")
+        if r is None:
+            return None
+
+        value = items[r]["value"]
+        if value == "__skip__":
+            return raw
+        if value == "__add__":
+            _spell_add_custom_word(stripped, word_set, notes)
+            return "___ADDED_TO_DICT___"
+        if value == "__skip_all__":
+            skip_all_ref[0] = True
+            return "___SKIP_ALL___"
+        if value == "__type__":
+            typed = ask_text("Type your correction", "Replacement for “%s”:" % raw,
+                             default=raw, crumb="Spell Check",
+                             help="Type the correct spelling and press Enter.")
+            if typed is not None:
+                return typed
+            continue
+        if not value.startswith("__"):
+            return value
+
+
+def run_spell_check(items, notes):
+    """Run the Australian English spell check on label text, modifying items in-place."""
+    word_set = _load_spell_words()
+    if _SPELL_DICT_SOURCE and _SPELL_DICT_SOURCE != "AU_english.txt":
+        notes.append(("info", "Spell checker is using %s because AU_english.txt wasn't found. "
+                              "Rename the preferred dictionary to AU_english.txt if you want to make it the default." % _SPELL_DICT_SOURCE))
+    if not _SPELL_HAS_FULL_DICT:
+        if _SPELL_FULL_DICT_WORD_COUNT:
+            reason = "AU_english.txt only has %d usable words" % _SPELL_FULL_DICT_WORD_COUNT
+        else:
+            reason = "AU_english.txt was not found or could not be read"
+        notes.append(("warn", reason + " — checking common typos and known US spellings only. "
+                              "Add a full Australian English word list (at least %d words) beside this script "
+                              "for broader spell checking." % _SPELL_MIN_FULL_DICT_WORDS))
+
+    tui_was_off = not _TUI["on"]
+    if tui_was_off and IS_TTY:
+        tui_start()
+
+    total_checked = 0
+    total_changed = 0
+    skip_all_ref = [False]
+    try:
+        for item in items:
+            if skip_all_ref[0]:
+                break
+            for key, label in _SPELL_FIELDS:
+                if skip_all_ref[0]:
+                    break
+                text = item.get(key, "")
+                if not text:
+                    continue
+                corrected, changed = spell_check_field(label, text, word_set, notes, skip_all_ref)
+                if changed:
+                    item[key] = corrected
+                    total_changed += 1
+                total_checked += 1
+
+            # Extra detail values often include the names of art materials.
+            for detail_index, detail_text in enumerate(item.get("details", [])):
+                if skip_all_ref[0]:
+                    break
+                if not detail_text:
+                    continue
+                corrected, changed = spell_check_field("Detail line %d" % (detail_index + 1),
+                                                       detail_text, word_set, notes, skip_all_ref)
+                if changed:
+                    item["details"][detail_index] = corrected
+                    total_changed += 1
+                total_checked += 1
+    finally:
+        if tui_was_off and _TUI["on"]:
+            tui_stop()
+
+    if _SPELL_SYMSPELL_LOAD_FAILED:
+        notes.append(("info", "Fast spell suggestions weren't available, so the built-in fallback was used. "
+                              "The checker can try installing symspellpy again on the next run."))
+
+    if total_changed:
+        notes.append(("ok", "Spell checker: corrected spelling in %d field%s out of %d checked field%s." %
+                       (total_changed, "" if total_changed == 1 else "s",
+                        total_checked, "" if total_checked == 1 else "s")))
 
 
 # ════════════════════════════════════════════════════════════════════════════
