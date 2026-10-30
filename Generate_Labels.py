@@ -15,6 +15,7 @@ Folders (created automatically):
     Generated_Labels/   finished PDFs appear here
 """
 import sys, os, re, csv, copy, json, shutil, argparse, importlib, subprocess, textwrap, unicodedata, atexit
+from html import unescape as html_unescape
 from xml.sax.saxutils import escape as xml_escape
 from datetime import datetime
 
@@ -162,12 +163,26 @@ def nice_header(h, n=60):
 
 
 def clean_text(val, multi=True):
-    """Tidy one spreadsheet cell.  MS Forms ends 'tick all that apply' answers with ';' - turn those into commas."""
+    """Tidy spreadsheet text and turn form HTML line breaks into real new lines.
+
+    Microsoft Forms / exported listing text can contain literal <br> tags (or
+    encoded versions such as &lt;br&gt;). Decode those before PDF markup escapes
+    the text, otherwise the tags are printed visibly instead of creating breaks.
+    """
     if val is None:
         return ""
     if isinstance(val, float) and val.is_integer():
         val = int(val)
-    s = str(val).replace("\xa0", " ").replace("\u200b", "").strip()
+    s = str(val).replace("\xa0", " ").replace("\u200b", "")
+    # Decode HTML entities first, so an encoded &lt;br&gt; is handled too.
+    s = html_unescape(s)
+    # Preserve intentional paragraphs/line breaks from forms and web listings.
+    s = re.sub(r"(?i)<br\s*/?\s*>", "\n", s)
+    s = re.sub(r"(?i)</p\s*>", "\n\n", s)
+    s = re.sub(r"(?i)<p(?:\s+[^>]*)?>", "", s)
+    s = re.sub(r"(?i)</div\s*>", "\n", s)
+    s = re.sub(r"(?i)<div(?:\s+[^>]*)?>", "", s)
+    s = s.replace("\r\n", "\n").replace("\r", "\n").strip()
     if multi and s.endswith(";"):
         s = ", ".join(p.strip() for p in s.split(";") if p.strip())
     return s
@@ -183,6 +198,9 @@ def safe_filename(name):
 
 
 def stmt_markup(text):
+    # Normalise form-supplied <br> tags here as well as in clean_text, so any
+    # statement passed to the PDF renderer always turns line breaks into layout.
+    text = clean_text(text, multi=False)
     lines = [l.strip() for l in str(text).replace("\r", "").split("\n")]
     t = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
     return xml_escape(t).replace("\n", "<br/>")
@@ -677,11 +695,13 @@ def draw_card(c, card, x, top, h, foot=None):
 
 
 def render_pdf(items, profile, out_path):
-    """Draw labels at their own natural heights, stacking each column independently.
+    """Arrange labels in cut-friendly rows with aligned borders.
 
-    Short labels no longer inherit the height of a long label beside them. If a
-    label is too tall for a single column, it gets a full-width space. Extremely
-    long statements can still continue onto another page.
+    Labels of similar height share a row, so their top and bottom borders line
+    up. If a label is much taller than its neighbours, it gets a full-width
+    row instead of stretching a short label beside it. Rows are packed by size
+    to use the page efficiently; each row can be cut as a horizontal strip, and
+    two-column strips can then be cut down the middle.
     """
     load_fonts()
     lay = {**DEFAULT_LAYOUT, **profile["layout"]}
@@ -691,11 +711,11 @@ def render_pdf(items, profile, out_path):
     uw, uh = pw - 2 * m, ph - 2 * m
     cols, rows = max(1, int(lay["columns"])), max(1, int(lay["rows"]))
     cw = uw / cols
-    standard_h = uh / rows  # used only for the summary, not as a forced label height
+    standard_h = uh / rows
     smin = max(MIN_FONT, float(lay["statement_min"]))
     spref = max(smin, float(lay["statement_size"]))
     auc = profile["auction"]
-    gap = 8  # a little space between independently sized labels
+    gap = 8  # keep a small gap between cut rows
 
     def indicator(it):
         if it["auction"] is None:
@@ -708,41 +728,17 @@ def render_pdf(items, profile, out_path):
     c.setTitle(profile["profile_name"] + " - Labels")
     c.setAuthor("Exhibition Label Studio")
     st = dict(started=False, pages=0, grown=0, wide=0, split=0, labels=0)
-    # Each column tracks its own used height, rather than sharing a row height.
-    column_y = [0.0] * cols
 
     def new_page():
         if st["started"]:
             c.showPage()
         st["started"] = True
         st["pages"] += 1
-        for i in range(cols):
-            column_y[i] = 0.0
-
-    def start_page_if_needed():
-        if not st["started"]:
-            new_page()
-
-    def place_full_width(card):
-        """Place a tall label across the page, below everything already placed."""
-        start_page_if_needed()
-        y = max(column_y)
-        if y + card.h > uh + 0.01:
-            new_page()
-            y = 0.0
-        draw_card(c, card, m, ph - m - y, card.h)
-        next_y = y + card.h + gap
-        for i in range(cols):
-            column_y[i] = next_y
-        st["wide"] += cols > 1
-        st["grown"] += card.h > standard_h + 0.5
 
     def split_across_pages(it):
-        """Split an exceptionally long statement over pages without stretching its box."""
+        """Give a statement that cannot fit on one page its own page sequence."""
         st["split"] += 1
-        # A full-width split label needs a clear page so it cannot overlap other labels.
-        if not st["started"] or max(column_y) > 0:
-            new_page()
+        new_page()
         iw, ind = uw - 2 * PAD, indicator(it)
         pending = Paragraph(stmt_markup(it["statement"]), make_styles(smin)["stmt"])
         first = True
@@ -760,7 +756,6 @@ def render_pdf(items, profile, out_path):
                     part, rest = pieces[0], None
                 else:
                     # An unusually long unbreakable string cannot be split by Paragraph.
-                    # Place the remainder as a separate paragraph to avoid an endless loop.
                     plain = pending.getPlainText()
                     cut = max(1, min(len(plain), int(len(plain) * 0.6)))
                     part = Paragraph(xml_escape(plain[:cut]), make_styles(smin)["stmt"])
@@ -769,38 +764,130 @@ def render_pdf(items, profile, out_path):
             card_h = min(uh, card.h)
             draw_card(c, card, m, ph - m, card_h,
                       foot="continued on the next page  ►" if rest else None)
-            column_y[:] = [card_h + gap] * cols
             pending, first = rest, False
             if pending is not None:
                 new_page()
 
-    for it in items:
+    # Only labels that would take up a genuinely large chunk of the page
+    # become full-width. Ordinary labels can be taller than the nominal grid
+    # row; the height-matching step below pairs them with similarly sized ones.
+    if cols == 1:
+        tall_row_limit = uh
+    else:
+        tall_row_limit = min(standard_h * 1.28, uh * 0.58)
+
+    regular = []
+    row_objects = []
+    split_items = []
+
+    for order, it in enumerate(items):
         ind = indicator(it)
         card = fit_card(it, cw, spref, smin, ind, uh)
 
-        # If it cannot fit within one column even at the minimum statement size,
-        # try the full page width before deciding it needs to split across pages.
         if card.h > uh:
-            full_card = fit_card(it, uw, spref, smin, ind, uh)
-            if full_card.h <= uh:
-                place_full_width(full_card)
-                st["labels"] += 1
-                continue
-            split_across_pages(it)
-            st["labels"] += 1
+            # Try wrapping a very long label across the page before splitting it.
+            wide_card = fit_card(it, uw, spref, smin, ind, uh) if cols > 1 else card
+            if wide_card.h <= uh:
+                row_objects.append({
+                    "cards": [(0, wide_card)], "height": wide_card.h,
+                    "wide": cols > 1, "order": order,
+                })
+            else:
+                split_items.append(it)
             continue
 
-        start_page_if_needed()
-        # Put this label into the least-used column that has room for its own height.
-        available = [i for i, y in enumerate(column_y) if y + card.h <= uh + 0.01]
-        if not available:
-            new_page()
-            available = list(range(cols))
-        col = min(available, key=lambda i: column_y[i])
-        top = ph - m - column_y[col]
-        draw_card(c, card, m + col * cw, top, card.h)
-        column_y[col] += card.h + gap
-        st["grown"] += card.h > standard_h + 0.5
+        # Keep taller labels in the matching pool too. Two long labels can
+        # share a cut row safely when their heights are close; a long label
+        # with no suitable partner will be made full-width below.
+        regular.append({"card": card, "order": order, "height": card.h,
+                        "item": it, "indicator": ind})
+
+    # Pair labels only when their natural heights are close enough that the
+    # shorter box will not be stretched by much. Unmatched labels get a half-
+    # width row of their own, with no forced extra height.
+    regular.sort(key=lambda item: (item["height"], item["order"]))
+    i = 0
+    while i < len(regular):
+        group = regular[i:i + cols]
+        can_pair = len(group) == cols
+        if can_pair and cols > 1:
+            heights = [g["height"] for g in group]
+            difference = max(heights) - min(heights)
+            tolerance = max(18.0, min(heights) * 0.30)
+            can_pair = difference <= tolerance
+        if can_pair:
+            # Keep the original left-to-right order within each pair/row.
+            group.sort(key=lambda item: item["order"])
+            row_h = max(g["height"] for g in group)
+            row_objects.append({
+                "cards": [(col, entry["card"]) for col, entry in enumerate(group)],
+                "height": row_h, "wide": False,
+                "order": min(entry["order"] for entry in group),
+            })
+            i += cols
+        else:
+            entry = regular[i]
+            if cols > 1 and entry["height"] > tall_row_limit:
+                # A tall label without a similarly sized partner gets its own
+                # full-width row, rather than stretching or risking a bad cut.
+                wide_card = fit_card(entry["item"], uw, spref, smin,
+                                     entry["indicator"], uh)
+                if wide_card.h <= uh:
+                    row_objects.append({
+                        "cards": [(0, wide_card)], "height": wide_card.h,
+                        "wide": True, "order": entry["order"],
+                    })
+                else:
+                    split_items.append(entry["item"])
+            else:
+                row_objects.append({
+                    "cards": [(0, entry["card"])], "height": entry["height"],
+                    "wide": False, "order": entry["order"],
+                })
+            i += 1
+
+    # Best-fit decreasing: put the biggest rows first, then place each into the
+    # page with the least leftover space that can still fit it. This reduces
+    # wasted paper while keeping every row's borders aligned.
+    row_objects.sort(key=lambda row: (-row["height"], row["order"]))
+    page_rows, page_used = [], []
+    for row in row_objects:
+        h = row["height"]
+        choices = []
+        for pi, used in enumerate(page_used):
+            extra = (gap if page_rows[pi] else 0) + h
+            if used + extra <= uh + 0.01:
+                choices.append((uh - (used + extra), pi, extra))
+        if choices:
+            _, pi, extra = min(choices)
+            page_rows[pi].append(row)
+            page_used[pi] += extra
+        else:
+            page_rows.append([row])
+            page_used.append(h)
+
+    # Draw each page by full horizontal rows. For paired labels, both boxes use
+    # the same row height so the guillotine can cut straight across the sheet.
+    for plan in page_rows:
+        new_page()
+        plan.sort(key=lambda row: (-row["height"], row["order"]))
+        y = 0.0
+        for row in plan:
+            top = ph - m - y
+            row_h = row["height"]
+            for col, card in row["cards"]:
+                x = m if row["wide"] else m + col * cw
+                draw_card(c, card, x, top, row_h)
+                st["labels"] += 1
+                st["grown"] += row_h > card.h + 0.5
+            if row["wide"]:
+                st["wide"] += 1
+            y += row_h + gap
+
+    # Extra-long statements need a dedicated page sequence and are kept away
+    # from all other labels so their continuation pages stay easy to cut.
+    for it in split_items:
+        split_across_pages(it)
         st["labels"] += 1
 
     if st["started"]:
